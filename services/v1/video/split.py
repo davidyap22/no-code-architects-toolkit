@@ -153,12 +153,30 @@ def split_video(video_url, splits, job_id=None, video_codec='libx264', video_pre
             
             logger.info(f"Running FFmpeg command for split {index+1}: {' '.join(cmd)}")
             
-            # Run the FFmpeg command
-            process = subprocess.run(cmd, capture_output=True, text=True)
+            # --- START: 替换原有的 subprocess.run 逻辑以修复 I/O 阻塞 ---
+            # 1. 定义临时文件路径用于捕获 FFmpeg 输出
+            log_file = os.path.join(LOCAL_STORAGE_PATH, f"{job_id}_split_{index+1}.log")
             
-            if process.returncode != 0:
-                logger.error(f"Error processing split {index+1}: {process.stderr}")
-                raise Exception(f"FFmpeg error for split {index+1}: {process.stderr}")
+            try:
+                # 2. 运行 FFmpeg，将输出重定向到临时文件，而不是内存
+                with open(log_file, 'w') as f:
+                    process = subprocess.run(cmd, stdout=f, stderr=f, check=False)
+                
+                # 3. 检查返回码 (returncode)
+                if process.returncode != 0:
+                    # 如果失败，读取日志并抛出异常
+                    with open(log_file, 'r') as f:
+                        log_content = f.read()
+                        
+                    logger.error(f"Error processing split {index+1}. FFmpeg Log: {log_content}")
+                    raise Exception(f"FFmpeg error for split {index+1}. Check log file for details.")
+                    
+            finally:
+                # 4. 无论成功或失败，都清理日志文件
+                if os.path.exists(log_file):
+                    os.remove(log_file)
+            
+            # --- END: 修复后的代码块 ---
             
             # Add the output file to the list
             output_files.append(output_filename)
