@@ -3,9 +3,15 @@
 
 import os
 import ffmpeg
+import logging # <-- ADDED: Import logging module
+
 # Ensure you have necessary imports
 # from services.file_management import download_file 
 # from config import LOCAL_STORAGE_PATH
+
+# Configure logging to use standard output for Cloud Run
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__) # <-- ADDED: Define logger
 
 def process_audio_concatenate(media_urls, job_id, webhook_url=None):
     """
@@ -18,7 +24,7 @@ def process_audio_concatenate(media_urls, job_id, webhook_url=None):
 
     try:
         # Download all media files
-        print("Starting download of input audio files...")
+        logger.info("Starting download of input audio files...") # <-- CHANGED from print
         for i, media_item in enumerate(media_urls):
             # Assuming media_item['audio_url'] is the correct key based on your usage
             url = media_item['audio_url']
@@ -27,13 +33,14 @@ def process_audio_concatenate(media_urls, job_id, webhook_url=None):
             
             # Assuming download_file returns the path to the downloaded file
             # If download_file handles the full path, this line is fine:
+            # NOTE: We assume 'download_file' is imported and working.
             input_filename = download_file(url, temp_filename_local)
             input_files.append(input_filename)
-            print(f"Downloaded: {url} to {input_filename}")
+            logger.info(f"Downloaded: {url} to {input_filename}") # <-- CHANGED from print
 
         # 1. Generate an absolute path concat list file for FFmpeg
         concat_file_path = os.path.join(LOCAL_STORAGE_PATH, f"{job_id}_concat_list.txt")
-        print(f"Creating concat list file: {concat_file_path}")
+        logger.info(f"Creating concat list file: {concat_file_path}") # <-- CHANGED from print
 
         with open(concat_file_path, 'w', encoding='utf-8') as concat_file:
             for input_file in input_files:
@@ -47,7 +54,10 @@ def process_audio_concatenate(media_urls, job_id, webhook_url=None):
         # 2. Use the concat demuxer to concatenate the audio files
         # We switch to re-encoding (libmp3lame) if 'copy' fails due to inconsistent input streams.
         # Use c='copy' for maximum speed ONLY if you are certain all 9 files have identical formats.
-        print("Starting FFmpeg concatenation...")
+        logger.info("Starting FFmpeg concatenation...") # <-- CHANGED from print
+        
+        # NOTE: We are capturing stdout/stderr to help with debugging, but these large strings 
+        # might be contributing to the response size if the platform wraps them.
         (
             ffmpeg
             .input(concat_file_path, format='concat', safe=0)
@@ -61,7 +71,7 @@ def process_audio_concatenate(media_urls, job_id, webhook_url=None):
             )
             .run(overwrite_output=True, capture_stdout=True, capture_stderr=True) # Capture output for debugging
         )
-        print(f"Audio combination successful: {output_path}")
+        logger.info(f"Audio combination successful: {output_path}") # <-- CHANGED from print
 
         # 3. Clean up input files
         for f in input_files:
@@ -75,13 +85,14 @@ def process_audio_concatenate(media_urls, job_id, webhook_url=None):
         return output_path
         
     except ffmpeg.Error as e:
-        print("="*50)
-        print("FFmpeg Concatenation Failed!")
-        print(f"Stdout:\n{e.stdout.decode('utf8')}")
-        print(f"Stderr:\n{e.stderr.decode('utf8')}")
-        print("="*50)
+        logger.error("="*50)
+        logger.error("FFmpeg Concatenation Failed!")
+        # These outputs are for debugging logs, not the response body.
+        logger.error(f"Stdout:\n{e.stdout.decode('utf8')}") 
+        logger.error(f"Stderr:\n{e.stderr.decode('utf8')}")
+        logger.error("="*50)
         raise Exception(f"FFmpeg error during concatenation. See logs for details.") from e
         
     except Exception as e:
-        print(f"Audio combination failed: {str(e)}")
+        logger.error(f"Audio combination failed: {str(e)}") # <-- CHANGED from print
         raise
