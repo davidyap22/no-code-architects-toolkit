@@ -1,19 +1,29 @@
+# 核心 Web/任务框架
 Flask
 Werkzeug
-requests
-ffmpeg-python
-openai-whisper
 gunicorn
 APScheduler
-srt
-numpy
-torch
+
+# 网络请求
+requests
+
+# 音频处理 (核心功能)
+pydub                 # 新增: 实际的音频操作库
+
+# 云服务/认证 (您的现有列表)
 google-auth
 google-auth-oauthlib
 google-auth-httplib2
 google-api-python-client
 google-api-core
-google-cloud-storage
+google-cloud-storage    # 用于 GCS I/O
+
+# 其他工具 (保持不变，以防其他功能需要)
+ffmpeg-python           # 可选，如果pydub能满足需求，可移除
+openai-whisper
+srt
+numpy
+torch
 google-cloud-run
 psutil
 boto3
