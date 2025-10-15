@@ -2,100 +2,109 @@
 # (License header omitted for brevity)
 
 import os
-import ffmpeg
-import logging 
-import subprocess 
-
-# CRITICAL: These imports must point to your actual service files
-from services.file_management import download_file 
-from services.cloud_storage import upload_file 
+import subprocess
+import logging
+import uuid
+from typing import List, Tuple
+from services.file_management import download_file, cleanup_files
+from services.cloud_storage import upload_file
 from config import LOCAL_STORAGE_PATH
 
-# Configure logging to use standard output for Cloud Run
-logging.basicConfig(level=logging.INFO)
+# Set up logging
 logger = logging.getLogger(__name__)
 
-def process_audio_concatenate(media_urls, job_id, webhook_url=None):
+def process_audio_concatenation(audio_urls: List[str], job_id: str) -> str:
     """
-    Combine multiple audio files into one using FFmpeg's concat demuxer.
+    Downloads multiple audio files, combines them using FFmpeg, uploads the result 
+    to cloud storage, and cleans up local temporary files.
+
+    Args:
+        audio_urls (List[str]): List of public URLs for the audio files.
+        job_id (str): A unique ID for the processing job (used for file naming).
+
+    Returns:
+        str: The public URL of the final merged audio file in cloud storage.
     
-    This function applies critical fixes for path compatibility (POSIX style), 
-    response size limits (returns URL only), and robust error logging.
+    Raises:
+        Exception: If downloading, FFmpeg processing, or uploading fails.
     """
-    input_files = []
-    output_filename = f"{job_id}.mp3"
-    output_path = os.path.join(LOCAL_STORAGE_PATH, output_filename)
-
+    downloaded_files: List[str] = []
+    output_path: str = ""
+    
     try:
-        # 1. Download all media files
-        logger.info("Starting download of input audio files...") 
-        for i, media_item in enumerate(media_urls):
-            url = media_item['audio_url']
-            temp_filename_local = os.path.join(LOCAL_STORAGE_PATH, f"{job_id}_input_{i}.mp3")
-            
-            input_filename = download_file(url, temp_filename_local)
-            input_files.append(input_filename)
-            logger.info(f"Downloaded: {url} to {input_filename}")
-
-        # 2. Generate an absolute path concat list file for FFmpeg
-        concat_file_path = os.path.join(LOCAL_STORAGE_PATH, f"{job_id}_concat_list.txt")
-        logger.info(f"Creating concat list file: {concat_file_path}") 
-
-        with open(concat_file_path, 'w', encoding='utf-8') as concat_file:
-            for input_file in input_files:
-                # CRITICAL FIX: Convert to POSIX-style absolute path for FFmpeg compatibility
-                abs_posix_path = os.path.abspath(input_file).replace(os.path.sep, '/')
-                concat_file.write(f"file '{abs_posix_path}'\n")
-
-        # 3. Use the concat demuxer to concatenate the audio files
-        logger.info("Starting FFmpeg concatenation with c='copy'...")
+        logger.info(f"Starting audio concatenation for job: {job_id}. Total files: {len(audio_urls)}")
         
-        # CRITICAL FIX: Do not capture stdout/stderr to prevent Response size too large error
-        (
-            ffmpeg
-            .input(concat_file_path, format='concat', safe=0)
-            .output(
-                output_path, 
-                c='copy',  # Fastest option
-            )
-            .run(overwrite_output=True) 
+        # 1. Download all input audio files
+        for url in audio_urls:
+            local_path = download_file(url, LOCAL_STORAGE_PATH)
+            downloaded_files.append(local_path)
+            logger.info(f"Downloaded file: {url} to {local_path}")
+
+        # 2. Create the FFmpeg concat list file
+        concat_list_path = os.path.join(LOCAL_STORAGE_PATH, f"concat_list_{job_id}.txt")
+        with open(concat_list_path, 'w') as f:
+            for file_path in downloaded_files:
+                # Use 'file' protocol to reference files in the same directory
+                f.write(f"file '{os.path.basename(file_path)}'\n")
+        
+        # Add concat list to cleanup list
+        downloaded_files.append(concat_list_path)
+
+        # 3. Perform FFmpeg concatenation
+        output_filename = f"{job_id}_merged.mp3"
+        output_path = os.path.join(LOCAL_STORAGE_PATH, output_filename)
+        
+        # FFmpeg command for concatenation:
+        # -f concat: Reads the list file
+        # -safe 0: Allows relative paths in the list file
+        # -i {list}: Specifies the input list file
+        # -c copy: Merges without re-encoding (FASTEST and generally recommended for same format)
+        cmd = [
+            'ffmpeg',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', concat_list_path,
+            '-c', 'copy',
+            output_path
+        ]
+        
+        logger.info(f"Running FFmpeg command for merge: {' '.join(cmd)}")
+        
+        # Run the FFmpeg command
+        # Note: We execute from LOCAL_STORAGE_PATH to make file paths in the list relative
+        process = subprocess.run(
+            cmd, 
+            cwd=LOCAL_STORAGE_PATH, # Run command from the working directory
+            capture_output=True, 
+            text=True
         )
         
-        logger.info(f"Audio combination successful: {output_path}")
+        if process.returncode != 0:
+            logger.error(f"FFmpeg Merge Error: {process.stderr}")
+            raise Exception(f"FFmpeg concatenation failed: {process.stderr}")
+        
+        logger.info(f"Successfully created merged audio: {output_path}")
 
-        # 4. Upload file and return URL (CRITICAL FIX for POST 500/Response Size error)
-        if not os.path.exists(output_path):
-            raise FileNotFoundError(f"Output file {output_path} does not exist after combination.")
+        # 4. Upload the result to cloud storage
+        # Cloud Storage destination path (e.g., "merged_audio/job_id_merged.mp3")
+        destination_path = f"merged_audio/{output_filename}"
 
-        logger.info(f"Uploading merged audio file to Cloud Storage: {output_path}")
+        # FIX: Now correctly calls upload_file with 2 required arguments
+        cloud_url = upload_file(output_path, destination_path)
         
-        # Assume upload_file handles the destination bucket logic.
-        cloud_url = upload_file(output_path, f"merged_audio/{output_filename}")
+        logger.info(f"Final merged audio uploaded to: {cloud_url}")
         
-        # 5. Clean up temporary files (local merged file and all inputs)
-        os.remove(output_path)
-        for f in input_files:
-            os.remove(f)
-        os.remove(concat_file_path)
-
-        logger.info(f"Cleanup complete. Returning URL: {cloud_url}")
-        
-        # Return the public URL only
-        return {"audio_url": cloud_url}
-        
-    except ffmpeg.Error as e:
-        logger.error("="*50)
-        logger.error("FFmpeg Concatenation Failed! Check Cloud Run logs for raw FFmpeg output.")
-        logger.error("="*50)
-        raise Exception(f"FFmpeg error during concatenation. Check Cloud Run logs for details.") from e
+        return cloud_url
         
     except Exception as e:
-        logger.error(f"Audio combination failed: {str(e)}")
-        # Ensures cleanup on failure
-        if 'input_files' in locals():
-            for f in input_files:
-                if os.path.exists(f): os.remove(f)
-        if 'concat_file_path' in locals() and os.path.exists(concat_file_path): os.remove(concat_file_path)
-        if 'output_path' in locals() and os.path.exists(output_path): os.remove(output_path)
-        
+        logger.error(f"Audio concatenation failed for job {job_id}: {str(e)}")
         raise
+        
+    finally:
+        # 5. Clean up all temporary files (inputs, list file, and final output)
+        if output_path and os.path.exists(output_path):
+            downloaded_files.append(output_path)
+            
+        # Use cleanup_files function to safely remove everything
+        cleanup_files(downloaded_files)
+        logger.info(f"Cleaned up {len(downloaded_files)} temporary files for job {job_id}.")
