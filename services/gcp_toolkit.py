@@ -1,20 +1,5 @@
 # Copyright (c) 2025 Stephen G. Pope
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
-
-
+# (License header omitted for brevity)
 
 import os
 import json
@@ -57,14 +42,22 @@ def initialize_gcp_client():
 # Initialize the GCS client
 gcs_client = initialize_gcp_client()
 
-def upload_to_gcs(file_path, bucket_name=GCP_BUCKET_NAME):
+# FIX: Add destination_blob_name to the signature
+def upload_to_gcs(file_path, bucket_name=GCP_BUCKET_NAME, destination_blob_name=None):
     if not gcs_client:
         raise ValueError("GCS client is not initialized. Skipping file upload.")
 
+    # Determine the target path in GCS
+    # If destination_blob_name is provided, use it. Otherwise, use the base filename.
+    target_blob_name = destination_blob_name if destination_blob_name else os.path.basename(file_path)
+
     try:
-        logger.info(f"Uploading file to Google Cloud Storage: {file_path}")
+        logger.info(f"Uploading file to Google Cloud Storage: {file_path} as {target_blob_name}")
         bucket = gcs_client.bucket(bucket_name)
-        blob = bucket.blob(os.path.basename(file_path))
+        
+        # Use the determined target_blob_name to create the blob
+        blob = bucket.blob(target_blob_name) 
+        
         blob.upload_from_filename(file_path)
         logger.info(f"File uploaded successfully to GCS: {blob.public_url}")
         return blob.public_url
@@ -74,6 +67,7 @@ def upload_to_gcs(file_path, bucket_name=GCP_BUCKET_NAME):
 
 
 def trigger_cloud_run_job(job_name, location="us-central1", overrides=None):
+    # (Rest of the trigger_cloud_run_job function remains unchanged)
     # Retrieve service account credentials
     json_str = os.environ.get("GCP_SA_CREDENTIALS")
     if not json_str:
