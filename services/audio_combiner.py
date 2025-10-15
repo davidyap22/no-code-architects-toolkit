@@ -1,111 +1,89 @@
 # Copyright (c) 2025 Stephen G. Pope
 # (License header omitted for brevity)
 
-import os
-import subprocess
+import json
 import logging
+import os
 import uuid
-from typing import List, Tuple
-# FIX: 导入 services/file_management.py 中的下载和清理函数
-from services.file_management import download_file, cleanup_files 
-from services.cloud_storage import upload_file
-# 假设 config.py 中定义了 LOCAL_STORAGE_PATH
-from config import LOCAL_STORAGE_PATH 
+from flask import Blueprint, request, jsonify
 
-# Set up logging
+# FIX: 从 audio_combiner 导入核心处理函数
+from services.audio_combiner import process_audio_concatenation 
+# 假设 gcp_toolkit.py 提供了触发 Cloud Run Job 的功能
+from services.gcp_toolkit import trigger_cloud_run_job 
+
 logger = logging.getLogger(__name__)
 
-def process_audio_concatenation(audio_urls: List[str], job_id: str) -> str:
-    """
-    Downloads multiple audio files, combines them using FFmpeg, uploads the result 
-    to cloud storage, and cleans up local temporary files.
+# 使用 job_name 作为 Blueprint name
+concatenate_bp = Blueprint('concatenate', __name__)
 
-    Args:
-        audio_urls (List[str]): List of public URLs for the audio files.
-        job_id (str): A unique ID for the processing job (用于文件命名).
+# --- Cloud Run Job 环境检测 ---
+# 用于判断当前代码是在主 Web 服务中运行 (需要触发 Job) 
+# 还是在 Cloud Run Job (Batch) 环境中运行 (直接执行处理)
+IS_CLOUD_RUN_JOB_ENV = os.getenv('K_SERVICE') and os.getenv('CLOUD_RUN_EXECUTION')
 
-    Returns:
-        str: The public URL of the final merged audio file in cloud storage.
-    
-    Raises:
-        Exception: If downloading, FFmpeg processing, or uploading fails.
+
+@concatenate_bp.route('/', methods=['POST'])
+def concatenate():
     """
-    downloaded_files: List[str] = []
-    output_path: str = ""
-    
+    Handles POST requests for concatenating multiple audio files.
+    """
     try:
-        logger.info(f"Starting audio concatenation for job: {job_id}. Total files: {len(audio_urls)}")
-        
-        # 1. Download all input audio files
-        for url in audio_urls:
-            # download_file 现在使用 file_management 中的 UUID 逻辑来确保本地路径唯一性
-            local_path = download_file(url, LOCAL_STORAGE_PATH)
-            downloaded_files.append(local_path)
-            logger.info(f"Downloaded file: {url} to {local_path}")
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "Invalid JSON body provided."}), 400
 
-        # 2. Create the FFmpeg concat list file
-        concat_list_path = os.path.join(LOCAL_STORAGE_PATH, f"concat_list_{job_id}.txt")
-        # NOTE: 写入文件名时，我们只使用 basename，因为 FFmpeg 将在 LOCAL_STORAGE_PATH 目录下执行 (见步骤 3)
-        with open(concat_list_path, 'w') as f:
-            for file_path in downloaded_files:
-                f.write(f"file '{os.path.basename(file_path)}'\n")
-        
-        # 将 concat list 文件添加到清理列表
-        downloaded_files.append(concat_list_path)
+        audio_urls = data.get('audio_urls')
+        if not audio_urls or not isinstance(audio_urls, list) or len(audio_urls) < 2:
+            return jsonify({"error": "The request must contain a list of at least two 'audio_urls'."}), 400
 
-        # 3. Perform FFmpeg concatenation
-        output_filename = f"{job_id}_merged.mp3"
-        output_path = os.path.join(LOCAL_STORAGE_PATH, output_filename)
-        
-        cmd = [
-            'ffmpeg',
-            '-f', 'concat',
-            '-safe', '0',
-            '-i', os.path.basename(concat_list_path), # 输入文件使用 basename
-            '-c', 'copy',
-            os.path.basename(output_path) # 输出文件也使用 basename
-        ]
-        
-        logger.info(f"Running FFmpeg command for merge: {' '.join(cmd)}")
-        
-        # 在 LOCAL_STORAGE_PATH 目录下执行 FFmpeg 命令
-        process = subprocess.run(
-            cmd, 
-            cwd=LOCAL_STORAGE_PATH, 
-            capture_output=True, 
-            text=True
-        )
-        
-        if process.returncode != 0:
-            logger.error(f"FFmpeg Merge Error: {process.stderr}")
-            raise Exception(f"FFmpeg concatenation failed: {process.stderr}")
-        
-        logger.info(f"Successfully created merged audio: {output_path}")
+        job_id = str(uuid.uuid4())
+        logger.info(f"Received concatenation request for job ID: {job_id}")
 
-        # 4. Upload the result to cloud storage
-        # 目标云存储路径 (e.g., "merged_audio/job_id_merged.mp3")
-        destination_path = f"merged_audio/{output_filename}"
-
-        # FIX: 现在正确地使用 2 个必需参数调用 upload_file
-        cloud_url = upload_file(output_path, destination_path)
-        
-        logger.info(f"Final merged audio uploaded to: {cloud_url}")
-        
-        return cloud_url
-        
-    except Exception as e:
-        logger.error(f"Audio concatenation failed for job {job_id}: {str(e)}")
-        raise
-        
-    finally:
-        # 5. Clean up all temporary files (输入文件、列表文件和最终输出文件)
-        # 确保 output_path 被添加到清理列表（如果在 try 块内创建成功）
-        if output_path and os.path.exists(output_path):
-            downloaded_files.append(output_path)
+        if IS_CLOUD_RUN_JOB_ENV:
+            # --- 场景 1: 运行在 Cloud Run Job (Batch) 环境中 ---
+            # 直接执行繁重的工作
+            logger.info(f"Executing audio combination within job environment: {job_id}")
+            result_url = process_audio_concatenation(audio_urls, job_id)
+            return jsonify({
+                "job_id": job_id,
+                "status": "success",
+                "output_url": result_url,
+                "environment": "job_execution"
+            }), 200
+        else:
+            # --- 场景 2: 运行在 Cloud Run Service (Web) 环境中 ---
+            # 触发一个新的 Cloud Run Job 进行后台处理（推荐用于长任务）
             
-        # 调用 cleanup_files 函数进行安全清理
-        cleanup_files(downloaded_files)
-        logger.info(f"Cleaned up {len(downloaded_files)} temporary files for job {job_id}.")
-```eof
+            # 确保 CLOUD_RUN_JOB_NAME 环境变量已设置，且名称匹配您的 Job
+            CLOUD_RUN_JOB_NAME = os.environ.get('CLOUD_RUN_JOB_NAME', 'your-ffmpeg-job-name')
 
-请保存这个文件，然后告诉我下一步你想看哪个文件的代码！
+            # 将输入数据作为环境变量传递给 Job
+            overrides = {
+                "container_overrides": [
+                    {
+                        "env": [
+                            {"name": "JOB_INPUT_DATA", "value": json.dumps(data)},
+                            {"name": "JOB_TYPE", "value": "concatenate"}
+                        ]
+                    }
+                ]
+            }
+            
+            # 触发 Cloud Run Job
+            trigger_result = trigger_cloud_run_job(CLOUD_RUN_JOB_NAME, overrides=overrides)
+
+            if trigger_result.get("job_submitted"):
+                return jsonify({
+                    "job_id": job_id,
+                    "status": "processing_started",
+                    "message": f"Cloud Run Job '{trigger_result['execution_name']}' initiated for background processing.",
+                    "environment": "service_trigger"
+                }), 202
+            else:
+                logger.error(f"Failed to trigger Cloud Run Job: {trigger_result.get('error')}")
+                return jsonify({"error": "Failed to initiate background processing.", "details": trigger_result.get('error')}), 500
+
+    except Exception as e:
+        logger.error(f"Error during audio concatenation request: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error during processing request."}), 500
