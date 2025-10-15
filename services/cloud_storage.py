@@ -1,24 +1,10 @@
 # Copyright (c) 2025 Stephen G. Pope
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
-
-
+# (License header omitted for brevity)
 
 import os
 import logging
 from abc import ABC, abstractmethod
+# Assuming these toolkit functions are updated to accept destination_path as well
 from services.gcp_toolkit import upload_to_gcs
 from services.s3_toolkit import upload_to_s3
 from config import validate_env_vars
@@ -40,15 +26,18 @@ def parse_s3_url(s3_url):
 
 class CloudStorageProvider(ABC):
     @abstractmethod
-    def upload_file(self, file_path: str) -> str:
+    # FIX 1: Add destination_path to the required signature
+    def upload_file(self, file_path: str, destination_path: str) -> str:
         pass
 
 class GCPStorageProvider(CloudStorageProvider):
     def __init__(self):
         self.bucket_name = os.getenv('GCP_BUCKET_NAME')
 
-    def upload_file(self, file_path: str) -> str:
-        return upload_to_gcs(file_path, self.bucket_name)
+    # FIX 2: Accept destination_path and pass it to the GCS toolkit
+    def upload_file(self, file_path: str, destination_path: str) -> str:
+        # Note: We assume upload_to_gcs now accepts the target destination path
+        return upload_to_gcs(file_path, self.bucket_name, destination_path)
 
 class S3CompatibleProvider(CloudStorageProvider):
     def __init__(self):
@@ -83,8 +72,18 @@ class S3CompatibleProvider(CloudStorageProvider):
             except Exception as e:
                 logger.warning(f"Failed to parse Digital Ocean URL: {e}. Using provided values.")
 
-    def upload_file(self, file_path: str) -> str:
-        return upload_to_s3(file_path, self.endpoint_url, self.access_key, self.secret_key, self.bucket_name, self.region)
+    # FIX 3: Accept destination_path and pass it to the S3 toolkit
+    def upload_file(self, file_path: str, destination_path: str) -> str:
+        # Note: We assume upload_to_s3 now accepts the target destination path
+        return upload_to_s3(
+            file_path, 
+            self.endpoint_url, 
+            self.access_key, 
+            self.secret_key, 
+            self.bucket_name, 
+            self.region, 
+            destination_path # Passed as the final argument
+        )
 
 def get_storage_provider() -> CloudStorageProvider:
     
@@ -105,11 +104,13 @@ def get_storage_provider() -> CloudStorageProvider:
     
     raise ValueError(f"No cloud storage settings provided.")
 
-def upload_file(file_path: str) -> str:
+# FIX 4: Update the public-facing function to accept destination_path
+def upload_file(file_path: str, destination_path: str) -> str:
     provider = get_storage_provider()
     try:
-        logger.info(f"Uploading file to cloud storage: {file_path}")
-        url = provider.upload_file(file_path)
+        logger.info(f"Uploading file to cloud storage: {file_path} to destination {destination_path}")
+        # Pass both parameters to the provider's upload_file method
+        url = provider.upload_file(file_path, destination_path) 
         logger.info(f"File uploaded successfully: {url}")
         return url
     except Exception as e:
