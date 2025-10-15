@@ -17,65 +17,72 @@
 
 
 import os
-import uuid
 import requests
-from urllib.parse import urlparse, parse_qs
-import mimetypes
+import logging
+from typing import List
+import uuid  # <-- 缺失的导入
 
-def get_extension_from_url(url):
-    """Extract file extension from URL or content type.
-    
-    Args:
-        url (str): The URL to extract the extension from
-        
-    Returns:
-        str: The file extension including the dot (e.g., '.jpg')
-        
-    Raises:
-        ValueError: If no valid extension can be determined from the URL or content type
+logger = logging.getLogger(__name__)
+
+def download_file(url: str, storage_path: str) -> str:
     """
-    # First try to get extension from URL
-    parsed_url = urlparse(url)
-    path = parsed_url.path
-    if path:
-        ext = os.path.splitext(path)[1].lower()
-        if ext:
-            return ext
+    Downloads a file from a URL to the specified local storage path.
 
-    # If no extension in URL, try to determine from content type
-    try:
-        response = requests.head(url, allow_redirects=True)
-        content_type = response.headers.get('content-type', '').split(';')[0]
-        ext = mimetypes.guess_extension(content_type)
-        if ext:
-            return ext.lower()
-    except:
-        pass
+    Args:
+        url (str): The public URL of the file to download.
+        storage_path (str): The local directory path (e.g., /tmp/) to save the file.
 
-    # If we can't determine the extension, raise an error
-    raise ValueError(f"Could not determine file extension from URL: {url}")
-
-def download_file(url, storage_path="/tmp/"):
-    """Download a file from URL to local storage."""
-    # Create storage directory if it doesn't exist
-    os.makedirs(storage_path, exist_ok=True)
+    Returns:
+        str: The full local path of the downloaded file.
     
-    file_id = str(uuid.uuid4())
-    extension = get_extension_from_url(url)
-    local_filename = os.path.join(storage_path, f"{file_id}{extension}")
+    Raises:
+        Exception: If the download fails.
+    """
+    if not os.path.exists(storage_path):
+        os.makedirs(storage_path)
+
+    # Note: local_filename logic will be fully determined by the UUID logic below for safety.
+    local_filename = os.path.join(storage_path, os.path.basename(url).split('?')[0])
+    
+    logger.info(f"Attempting to download {url} to {local_filename}")
 
     try:
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
+        # Stream download to handle large files efficiently
+        with requests.get(url, stream=True) as r:
+            r.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+            
+            # Use UUID for robust, unique local filenames
+            unique_id = str(uuid.uuid4()).split('-')[0]
+            extension = os.path.splitext(os.path.basename(url).split('?')[0])[1] or '.mp4' 
+            # Ensure the extension is valid (e.g., handles /file.mp3?query=)
+            if not extension or len(extension) > 5:
+                extension = '.' + os.path.basename(url).split('.')[-1].split('?')[0]
+                if len(extension) > 5: # Fallback safety check
+                    extension = '.mp4'
+            
+            local_filename = os.path.join(storage_path, f"{unique_id}{extension}")
 
-        with open(local_filename, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
+            with open(local_filename, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
+            
+            logger.info(f"Download complete: {local_filename}")
+            return local_filename
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to download file from {url}: {e}")
+        raise Exception(f"File download failed: {e}")
 
-        return local_filename
-    except Exception as e:
-        if os.path.exists(local_filename):
-            os.remove(local_filename)
-        raise e
 
+def cleanup_files(file_paths: List[str]):
+    """
+    Safely removes a list of local files. Logs errors but does not raise exceptions.
+    """
+    for file_path in file_paths:
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.debug(f"Successfully cleaned up: {file_path}")
+        except OSError as e:
+            logger.error(f"Error removing temporary file {file_path}: {e}")
+            pass 
